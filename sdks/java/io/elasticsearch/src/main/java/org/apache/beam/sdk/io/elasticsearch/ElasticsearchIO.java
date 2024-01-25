@@ -108,10 +108,7 @@ import org.apache.http.nio.conn.ssl.SSLIOSessionStrategy;
 import org.apache.http.nio.entity.NStringEntity;
 import org.apache.http.ssl.SSLContexts;
 import org.checkerframework.checker.nullness.qual.Nullable;
-import org.elasticsearch.client.Request;
-import org.elasticsearch.client.Response;
-import org.elasticsearch.client.RestClient;
-import org.elasticsearch.client.RestClientBuilder;
+import org.elasticsearch.client.*;
 import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
@@ -2546,20 +2543,33 @@ public class ElasticsearchIO {
 
         HttpEntity requestBody =
             new NStringEntity(bulkRequest.toString(), ContentType.APPLICATION_JSON);
+
+        // Instead of throw an error when there is non-retryable response error, tag each doc has error.
+        boolean tagUnsuccessfully = false;
+
         try {
           Request request = new Request("POST", endPoint);
           request.addParameters(Collections.emptyMap());
           request.setEntity(requestBody);
           response = restClient.performRequest(request);
           responseEntity = new BufferedHttpEntity(response.getEntity());
-        } catch (java.io.IOException ex) {
+          } catch (java.io.IOException ex) {
           if (spec.getRetryConfiguration() == null || !isRetryableClientException(ex)) {
-            throw ex;
+            if (ex instanceof ResponseException) {
+              if (ex.getMessage().contains("is too long, must be no longer than 512 bytes but was")) {
+                LOG.info("id too long error");
+                tagUnsuccessfully = true;
+              }
+            }
+            else {
+              throw ex;
+            }
           }
           LOG.error("Caught ES timeout, retrying", ex);
         }
 
-        if (spec.getRetryConfiguration() != null
+        if (!tagUnsuccessfully &&
+            spec.getRetryConfiguration() != null
             && (response == null
                 || responseEntity == null
                 || spec.getRetryConfiguration().getRetryPredicate().test(responseEntity))) {
@@ -2570,10 +2580,16 @@ public class ElasticsearchIO {
           responseEntity = handleRetry("POST", endPoint, Collections.emptyMap(), requestBody);
         }
 
-        List<Document> responses =
-            createWriteReport(
-                responseEntity, spec.getAllowedResponseErrors(), spec.getThrowWriteErrors());
+        List<Document> responses;
 
+        if (tagUnsuccessfully) {
+          responses = inputEntries.stream()
+              .map(doc -> Document.create().withHasError(true).withResponseItemJson("{\"message\":\"one doc has id over 512 bytes. Full batch failed.\", \"status\": 400}"))
+              .collect(Collectors.toList());
+        }
+        else {
+          responses = createWriteReport(responseEntity, spec.getAllowedResponseErrors(), spec.getThrowWriteErrors());
+        }
         return Streams.zip(
                 inputEntries.stream(),
                 responses.stream(),

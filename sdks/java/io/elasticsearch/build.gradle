@@ -16,7 +16,10 @@
  * limitations under the License.
  */
 
-plugins { id 'org.apache.beam.module' }
+plugins {
+  id 'org.apache.beam.module'
+  id 'com.github.johnrengelman.shadow'
+}
 applyJavaNature( automaticModuleName: 'org.apache.beam.sdk.io.elasticsearch')
 
 description = "Apache Beam :: SDKs :: Java :: IO :: Elasticsearch"
